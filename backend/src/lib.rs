@@ -1,15 +1,21 @@
+pub mod assets_store;
 pub mod backend;
 pub mod handlers;
+pub mod models;
 pub mod providers;
 pub mod user;
 
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::{
+    Extension, Router,
+    routing::{get, put},
+};
 use axum_login::{login_required, AuthManagerLayerBuilder};
 use backend::MemoryBackend;
 use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
 
+use crate::assets_store::AssetsStore;
 use crate::providers::IdentityProvider;
 
 /// Builds the full app router. Used by both `main()` and integration tests,
@@ -18,6 +24,15 @@ pub fn app<I: IdentityProvider + 'static>(
     backend: MemoryBackend,
     provider: Arc<I>,
     secure_cookies: bool,
+) -> Router {
+    app_with_assets_store(backend, provider, secure_cookies, AssetsStore::default())
+}
+
+pub fn app_with_assets_store<I: IdentityProvider + 'static>(
+    backend: MemoryBackend,
+    provider: Arc<I>,
+    secure_cookies: bool,
+    assets_store: AssetsStore,
 ) -> Router {
     let session_store = MemoryStore::default();
     let session_layer = SessionManagerLayer::new(session_store)
@@ -36,8 +51,16 @@ pub fn app<I: IdentityProvider + 'static>(
         .route("/login", get(handlers::login_handler))
         .route("/callback", get(handlers::callback_handler))
         .route("/logout", get(handlers::logout_handler))
-        .route("/api/assets", get(handlers::my_assets_handler))
+        .route(
+            "/api/assets",
+            get(handlers::my_assets_handler).post(handlers::create_asset_handler),
+        )
+        .route(
+            "/api/assets/{asset_id}",
+            put(handlers::update_asset_handler).delete(handlers::delete_asset_handler),
+        )
         .route("/shubham", get(handlers::shubham_handler))
+        .layer(Extension(assets_store))
         .layer(auth_layer);
 
     router.with_state(provider)
@@ -53,6 +76,20 @@ mod tests {
 
     fn test_server() -> TestServer {
         let router = app(MemoryBackend::default(), Arc::new(MockProvider::default()), false);
+        let config = TestServerConfig {
+            save_cookies: true,
+            ..Default::default()
+        };
+        TestServer::new_with_config(router, config)
+    }
+
+    fn test_server_with_store(store: AssetsStore) -> TestServer {
+        let router = app_with_assets_store(
+            MemoryBackend::default(),
+            Arc::new(MockProvider::default()),
+            false,
+            store,
+        );
         let config = TestServerConfig {
             save_cookies: true,
             ..Default::default()
@@ -151,5 +188,58 @@ mod tests {
         assert_eq!(payload["client"]["name"], "William B. Sample");
         assert_eq!(payload["categories"].as_array().unwrap().len(), 18);
         assert_eq!(payload["funding"]["percent"], 34.9);
+    }
+
+    #[tokio::test]
+    async fn assets_api_crud_updates_the_json_file() {
+        let path = std::env::temp_dir().join(format!(
+            "my-assets-api-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data/my-assets.json");
+        tokio::fs::copy(fixture, &path).await.unwrap();
+        let server = test_server_with_store(AssetsStore::new(path.clone()));
+
+        let created = server
+            .post("/api/assets")
+            .json(&serde_json::json!({
+                "categoryId": "cash",
+                "name": "API test asset",
+                "details": "Created through HTTP",
+                "value": 900
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_asset: serde_json::Value =
+            serde_json::from_str(&created.text()).unwrap();
+        let asset_id = created_asset["id"].as_str().unwrap();
+
+        let updated = server
+            .put(&format!("/api/assets/{asset_id}"))
+            .json(&serde_json::json!({ "value": 1200 }))
+            .await;
+        updated.assert_status_ok();
+        let persisted_after_update: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert!(persisted_after_update["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|category| category["assets"].as_array().unwrap())
+            .any(|asset| asset["id"] == asset_id && asset["value"] == 1200));
+
+        let deleted = server.delete(&format!("/api/assets/{asset_id}")).await;
+        deleted.assert_status(StatusCode::NO_CONTENT);
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert!(!persisted["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|category| category["assets"].as_array().unwrap())
+            .any(|asset| asset["id"] == asset_id));
+        tokio::fs::remove_file(path).await.unwrap();
     }
 }

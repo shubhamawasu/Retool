@@ -9,6 +9,7 @@
     status: string;
     statusLabel: string;
     note?: string;
+    clientComment?: string;
     valueHelp?: string;
     excludedFromTotal?: boolean;
   };
@@ -39,10 +40,8 @@
   let search = $state('');
   let collapsed = $state<Record<string, boolean>>({});
   let draftValues = $state<Record<string, number>>({});
-  let deletedAssets = $state<string[]>([]);
   let commentDrafts = $state<Record<string, string>>({});
   let openComments = $state<Record<string, boolean>>({});
-  let savedComments = $state<Record<string, boolean>>({});
   let modalOpen = $state(false);
   let newAssetName = $state('');
   let newAssetCategory = $state('');
@@ -51,16 +50,32 @@
 
   onMount(async () => {
     try {
-      const response = await fetch('/api/assets');
-      if (!response.ok) throw new Error(`Request failed (${response.status})`);
-      page = await response.json() as AssetsPage;
-      newAssetCategory = page.categories[0]?.id ?? '';
+      await loadAssets();
     } catch (error) {
       loadError = error instanceof Error ? error.message : 'Unable to load assets.';
     } finally {
       loading = false;
     }
   });
+
+  async function loadAssets() {
+    const response = await fetch('/api/assets');
+    if (!response.ok) throw new Error(`Request failed (${response.status})`);
+    page = await response.json() as AssetsPage;
+    newAssetCategory ||= page.categories[0]?.id ?? '';
+  }
+
+  async function mutateAsset(url: string, method: 'POST' | 'PUT' | 'DELETE', body?: unknown) {
+    const response = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => null) as { error?: string } | null;
+      throw new Error(result?.error ?? `Request failed (${response.status})`);
+    }
+  }
 
   const visibleCategories = $derived(page?.categories
     .map((category) => ({
@@ -71,16 +86,13 @@
     }))
     .filter((category) => category.assets.length > 0 || (!search.trim() && category.assets.length === 0)) ?? []);
 
-  const draftCount = $derived(
-    Object.keys(draftValues).length + deletedAssets.length +
-    Object.keys(savedComments).filter((id) => savedComments[id]).length
-  );
+  const draftCount = $derived(Object.keys(draftValues).length);
 
   const totalValue = $derived((page?.totalValue ?? 0) + (page?.categories ?? []).reduce((total, category) =>
     total + category.assets.reduce((categoryTotal, asset) => {
       if (asset.excludedFromTotal || asset.status === 'not_fundable' || asset.status === 'not_funded') return categoryTotal;
       const originalValue = asset.id.startsWith('draft-') ? 0 : asset.value;
-      const proposedValue = deletedAssets.includes(asset.id) ? 0 : (draftValues[asset.id] ?? asset.value);
+      const proposedValue = draftValues[asset.id] ?? asset.value;
       return categoryTotal + proposedValue - originalValue;
     }, 0), 0));
 
@@ -91,7 +103,7 @@
   }
 
   function toggleCategory(id: string) {
-    collapsed[id] = !clolapsed[id];
+    collapsed[id] = !collapsed[id];
   }
 
   function updateValue(asset: Asset, event: Event) {
@@ -99,51 +111,90 @@
     if (Number.isFinite(value)) draftValues[asset.id] = value;
   }
 
-  function markForRemoval(id: string) {
-    if (!deletedAssets.includes(id)) deletedAssets = [...deletedAssets, id];
-  }
-
-  function undoRemoval(id: string) {
-    deletedAssets = deletedAssets.filter((assetId) => assetId !== id);
-  }
-
   function openComment(assetId: string) {
     openComments[assetId] = true;
-    commentDrafts[assetId] ??= '';
+    let asset: Asset | undefined;
+    for (const category of page?.categories ?? []) {
+      asset = category.assets.find((item) => item.id === assetId);
+      if (asset) break;
+    }
+    commentDrafts[assetId] ??= asset?.clientComment ?? '';
   }
 
-  function saveComment(assetId: string) {
-    if (!commentDrafts[assetId]?.trim()) return;
-    savedComments[assetId] = true;
-    openComments[assetId] = false;
+  async function saveComment(assetId: string) {
+    const clientComment = commentDrafts[assetId]?.trim();
+    if (!clientComment) return;
+    try {
+      await mutateAsset(`/api/assets/${encodeURIComponent(assetId)}`, 'PUT', { clientComment });
+      await loadAssets();
+      openComments[assetId] = false;
+      toast = 'Comment saved to the assets JSON file.';
+    } catch (error) {
+      toast = error instanceof Error ? error.message : 'Unable to save comment.';
+    }
   }
 
-  function addAsset(event: SubmitEvent) {
+  async function saveValue(asset: Asset) {
+    const value = draftValues[asset.id];
+    if (value === undefined || value === asset.value) return;
+    try {
+      await mutateAsset(`/api/assets/${encodeURIComponent(asset.id)}`, 'PUT', { value });
+      await loadAssets();
+      const { [asset.id]: _savedValue, ...remainingValues } = draftValues;
+      draftValues = remainingValues;
+      toast = 'Asset value saved to the JSON file.';
+    } catch (error) {
+      toast = error instanceof Error ? error.message : 'Unable to save asset value.';
+    }
+  }
+
+  async function deleteAsset(asset: Asset) {
+    if (!window.confirm(`Permanently delete “${asset.name}” from the assets JSON file?`)) return;
+    try {
+      await mutateAsset(`/api/assets/${encodeURIComponent(asset.id)}`, 'DELETE');
+      await loadAssets();
+      toast = 'Asset deleted from the JSON file.';
+    } catch (error) {
+      toast = error instanceof Error ? error.message : 'Unable to delete asset.';
+    }
+  }
+
+  async function addAsset(event: SubmitEvent) {
     event.preventDefault();
     if (!page || !newAssetName.trim() || newAssetValue === '') return;
-    const category = page.categories.find((item) => item.id === newAssetCategory);
-    if (!category) return;
-    category.assets.push({
-      id: `draft-${crypto.randomUUID()}`,
-      name: newAssetName.trim(),
-      details: 'Added by client',
-      value: Number(newAssetValue),
-      status: 'undecided',
-      statusLabel: 'Pending review'
-    });
-    draftValues[category.assets[category.assets.length - 1].id] = Number(newAssetValue);
-    newAssetName = '';
-    newAssetValue = '';
-    modalOpen = false;
-    toast = 'Asset added as a draft. Submit changes to send it to the firm.';
+    try {
+      await mutateAsset('/api/assets', 'POST', {
+        categoryId: newAssetCategory,
+        name: newAssetName.trim(),
+        details: 'Added by client',
+        value: Number(newAssetValue)
+      });
+      await loadAssets();
+      newAssetName = '';
+      newAssetValue = '';
+      modalOpen = false;
+      toast = 'Asset added to the JSON file.';
+    } catch (error) {
+      toast = error instanceof Error ? error.message : 'Unable to add asset.';
+    }
   }
 
-  function submitChanges() {
-    if (!draftCount) {
-      toast = 'There are no draft changes to submit.';
+  async function submitChanges() {
+    const pendingValues = Object.entries(draftValues);
+    if (!pendingValues.length) {
+      toast = 'All changes are already saved to the JSON file.';
       return;
     }
-    toast = 'Draft changes are ready. Connect a write API to submit them to the firm.';
+    try {
+      await Promise.all(pendingValues.map(([id, value]) =>
+        mutateAsset(`/api/assets/${encodeURIComponent(id)}`, 'PUT', { value })
+      ));
+      await loadAssets();
+      draftValues = {};
+      toast = 'Asset values saved to the JSON file.';
+    } catch (error) {
+      toast = error instanceof Error ? error.message : 'Unable to save asset values.';
+    }
   }
 </script>
 
@@ -219,12 +270,12 @@
 
         <section class="report-section" aria-label="Asset review report">
           <div class="report-heading">
-            <div><span class="eyebrow">CLIENT ASSET INVENTORY</span><h1>{page.client.reportTitle}</h1><p>Review account details and funding status, then send your updates to your legal team.</p></div>
+            <div><span class="eyebrow">CLIENT ASSET INVENTORY</span><h1>{page.client.reportTitle}</h1><p>Review asset details, update values, and keep the report current.</p></div>
             <button class="button button-outline add-button" onclick={() => modalOpen = true}><span aria-hidden="true">+</span> Add asset</button>
           </div>
 
           {#if draftCount > 0}
-            <div class="draft-banner" role="status"><span class="draft-symbol">!</span><span><strong>{draftCount} draft {draftCount === 1 ? 'change' : 'changes'}</strong> are not yet sent to your firm.</span><button class="text-button" onclick={submitChanges}>Review changes <span aria-hidden="true">→</span></button></div>
+            <div class="draft-banner" role="status"><span class="draft-symbol">!</span><span><strong>{draftCount} unsaved value {draftCount === 1 ? 'edit' : 'edits'}</strong> will be written to the JSON file.</span><button class="text-button" onclick={submitChanges}>Save now <span aria-hidden="true">→</span></button></div>
           {/if}
 
           <div class="toolbar"><label class="search-box"><span aria-hidden="true">⌕</span><input aria-label="Search assets" placeholder="Search assets" bind:value={search} /></label><span class="asset-count">{visibleCategories.reduce((count, category) => count + category.assets.length, 0)} assets shown</span></div>
@@ -240,12 +291,12 @@
                     <div class="empty-category">No {category.name.toLowerCase()} listed. Use <button class="inline-link" onclick={() => { newAssetCategory = category.id; modalOpen = true; }}>Add asset</button> to include one.</div>
                   {:else}
                     {#each category.assets as asset (asset.id)}
-                      <article class:removed={deletedAssets.includes(asset.id)} class="asset-row">
+                      <article class="asset-row">
                         <div class="asset-description"><strong>{asset.name}</strong><span>{asset.details}</span>{#if asset.valueHelp}<small class="asset-help">{asset.valueHelp}</small>{/if}</div>
-                        <div class="asset-value"><span class="mobile-label">Asset value</span><label class="value-field"><span class="currency-prefix">$</span><input aria-label={`Value for ${asset.name}`} type="number" min="-999999999" step="1" value={draftValues[asset.id] ?? asset.value} oninput={(event) => updateValue(asset, event)} disabled={deletedAssets.includes(asset.id)} /></label>{#if asset.excludedFromTotal}<small class="excluded-note">* Excluded from total</small>{/if}</div>
+                        <div class="asset-value"><span class="mobile-label">Asset value</span><label class="value-field"><span class="currency-prefix">$</span><input aria-label={`Value for ${asset.name}`} type="number" min="-999999999" step="1" value={draftValues[asset.id] ?? asset.value} oninput={(event) => updateValue(asset, event)} onblur={() => saveValue(asset)} /></label>{#if asset.excludedFromTotal}<small class="excluded-note">* Excluded from total</small>{/if}</div>
                         <div class="asset-status"><span class="mobile-label">Funding status</span><span class={`status-pill ${asset.status}`}>{#if asset.status === 'verified'}✓{:else if asset.status === 'needs_verification'}!{:else if asset.status === 'undecided'}?{:else}−{/if} {asset.statusLabel}</span></div>
-                        <div class="asset-comments"><span class="mobile-label">Comments</span>{#if asset.note}<p class="firm-note">{asset.note}</p>{:else if savedComments[asset.id]}<p class="saved-comment">Saved as a draft reply.</p>{:else}<button class="comment-link" onclick={() => openComment(asset.id)}>Add comment <span>(optional)</span></button>{/if}{#if openComments[asset.id]}<div class="comment-editor"><textarea maxlength="500" placeholder="Type your reply or comment..." bind:value={commentDrafts[asset.id]}></textarea><div class="comment-editor-footer"><span>{commentDrafts[asset.id]?.length ?? 0}/500</span><div><button class="text-button cancel-comment" onclick={() => openComments[asset.id] = false}>Cancel</button><button class="mini-primary" onclick={() => saveComment(asset.id)}>Save draft</button></div></div></div>{/if}</div>
-                        <div class="asset-actions">{#if deletedAssets.includes(asset.id)}<button class="undo-button" aria-label={`Undo removal of ${asset.name}`} onclick={() => undoRemoval(asset.id)}>Undo</button>{:else}<button class="remove-button" aria-label={`Mark ${asset.name} for removal`} title="Mark for removal" onclick={() => markForRemoval(asset.id)}>×</button>{/if}</div>
+                        <div class="asset-comments"><span class="mobile-label">Comments</span>{#if asset.note}<p class="firm-note">{asset.note}</p>{/if}{#if asset.clientComment}<p class="saved-comment">{asset.clientComment}</p>{/if}{#if !asset.clientComment}<button class="comment-link" onclick={() => openComment(asset.id)}>{asset.note ? 'Reply to firm' : 'Add comment'} <span>(optional)</span></button>{/if}{#if openComments[asset.id]}<div class="comment-editor"><textarea maxlength="500" placeholder="Type your reply or comment..." bind:value={commentDrafts[asset.id]}></textarea><div class="comment-editor-footer"><span>{commentDrafts[asset.id]?.length ?? 0}/500</span><div><button class="text-button cancel-comment" onclick={() => openComments[asset.id] = false}>Cancel</button><button class="mini-primary" onclick={() => saveComment(asset.id)}>Save to JSON</button></div></div></div>{/if}</div>
+                        <div class="asset-actions"><button class="remove-button" aria-label={`Delete ${asset.name}`} title="Delete asset" onclick={() => deleteAsset(asset)}>×</button></div>
                       </article>
                     {/each}
                   {/if}
@@ -255,7 +306,7 @@
             {#if visibleCategories.length === 0}<div class="no-results">No assets match “{search}”.</div>{/if}
           </div>
 
-          <div class="bottom-actions"><div class="total-copy"><span>ESTIMATED TOTAL</span><strong>{money(totalValue)}</strong><small>{page.totalNote}</small></div><div class="bottom-buttons"><button class="button button-outline" onclick={() => modalOpen = true}><span aria-hidden="true">+</span> Add asset</button><button class="button button-primary submit-button" onclick={submitChanges} disabled={draftCount === 0}>Submit changes <span aria-hidden="true">→</span></button></div></div>
+          <div class="bottom-actions"><div class="total-copy"><span>ESTIMATED TOTAL</span><strong>{money(totalValue)}</strong><small>{page.totalNote}</small></div><div class="bottom-buttons"><button class="button button-outline" onclick={() => modalOpen = true}><span aria-hidden="true">+</span> Add asset</button><button class="button button-primary submit-button" onclick={submitChanges} disabled={draftCount === 0}>Save values <span aria-hidden="true">→</span></button></div></div>
         </section>
       </div>
 
@@ -271,7 +322,7 @@
           <label>Asset category<select required bind:value={newAssetCategory}>{#each page.categories as category}<option value={category.id}>{category.name}</option>{/each}</select></label>
           <label>Asset description<input required maxlength="120" bind:value={newAssetName} placeholder="For example, savings account" /></label>
           <label>Estimated value<input required type="number" min="0" step="1" bind:value={newAssetValue} placeholder="0" /></label>
-          <p class="modal-note">This will be added as a draft and won't be sent until you submit your changes.</p>
+          <p class="modal-note">The new asset will be saved to the page JSON immediately.</p>
           <div class="modal-actions"><button type="button" class="button button-quiet" onclick={() => modalOpen = false}>Cancel</button><button type="submit" class="button button-primary">Add asset</button></div>
         </form>
       </div>

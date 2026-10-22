@@ -1,13 +1,32 @@
 use crate::backend::{AuthSession, OidcCredentials}; // see note below on Credentials type
 use crate::providers::IdentityProvider;
 use crate::providers::mock::MockProvider;
-use axum::extract::{Query, State};
-use axum::response::{IntoResponse, Redirect};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::json;
 use std::sync::Arc;
 use tower_sessions::Session;
+
+use crate::assets_store::{AssetsStore, AssetsStoreError};
+use crate::models::{Asset, AssetsPage, CreateAssetRequest, UpdateAssetRequest};
+
+impl IntoResponse for AssetsStoreError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::InvalidName => (StatusCode::BAD_REQUEST, "Asset name is required."),
+            Self::CategoryNotFound => (StatusCode::NOT_FOUND, "Asset category was not found."),
+            Self::AssetNotFound => (StatusCode::NOT_FOUND, "Asset was not found."),
+            Self::Io(_) | Self::Json(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to persist the assets JSON file.",
+            ),
+        };
+        (status, Json(json!({ "error": message }))).into_response()
+    }
+}
 
 pub async fn login_handler<I: IdentityProvider + 'static>(
     State(provider): State<Arc<I>>,
@@ -101,10 +120,34 @@ pub async fn index_handler() -> impl IntoResponse {
     "Home page. Try /login or /protected."
 }
 
-pub async fn my_assets_handler() -> Json<Value> {
-    let page = serde_json::from_str(include_str!("../data/my-assets.json"))
-        .expect("my-assets.json must contain valid JSON");
-    Json(page)
+pub async fn my_assets_handler(
+    Extension(store): Extension<AssetsStore>,
+) -> Result<Json<AssetsPage>, AssetsStoreError> {
+    Ok(Json(store.get_page().await?))
+}
+
+pub async fn create_asset_handler(
+    Extension(store): Extension<AssetsStore>,
+    Json(request): Json<CreateAssetRequest>,
+) -> Result<(StatusCode, Json<Asset>), AssetsStoreError> {
+    let asset = store.create_asset(request).await?;
+    Ok((StatusCode::CREATED, Json(asset)))
+}
+
+pub async fn update_asset_handler(
+    Extension(store): Extension<AssetsStore>,
+    Path(asset_id): Path<String>,
+    Json(request): Json<UpdateAssetRequest>,
+) -> Result<Json<Asset>, AssetsStoreError> {
+    Ok(Json(store.update_asset(&asset_id, request).await?))
+}
+
+pub async fn delete_asset_handler(
+    Extension(store): Extension<AssetsStore>,
+    Path(asset_id): Path<String>,
+) -> Result<StatusCode, AssetsStoreError> {
+    store.delete_asset(&asset_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn shubham_handler() -> impl IntoResponse {

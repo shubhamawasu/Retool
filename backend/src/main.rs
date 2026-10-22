@@ -1,7 +1,9 @@
 use ::backend::{app, backend::MemoryBackend, providers::mock::MockProvider};
 
 mod backend;
+mod assets_store;
 mod handlers;
+mod models;
 mod providers;
 mod user;
 
