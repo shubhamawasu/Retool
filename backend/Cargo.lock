@@ -170,6 +170,7 @@ dependencies = [
  "axum-test",
  "dotenvy",
  "serde",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",

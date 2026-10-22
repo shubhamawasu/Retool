@@ -36,6 +36,7 @@ pub fn app<I: IdentityProvider + 'static>(
         .route("/login", get(handlers::login_handler))
         .route("/callback", get(handlers::callback_handler))
         .route("/logout", get(handlers::logout_handler))
+        .route("/api/assets", get(handlers::my_assets_handler))
         .route("/shubham", get(handlers::shubham_handler))
         .layer(auth_layer);
 
@@ -138,5 +139,17 @@ mod tests {
         let response = server.get("/").await;
 
         response.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn my_assets_api_returns_the_complete_page_payload() {
+        let server = test_server();
+        let response = server.get("/api/assets").await;
+
+        response.assert_status_ok();
+        let payload: serde_json::Value = serde_json::from_str(&response.text()).unwrap();
+        assert_eq!(payload["client"]["name"], "William B. Sample");
+        assert_eq!(payload["categories"].as_array().unwrap().len(), 18);
+        assert_eq!(payload["funding"]["percent"], 34.9);
     }
 }

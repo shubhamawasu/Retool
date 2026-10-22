@@ -19,6 +19,27 @@ your local machine.
 
 If it doesn't, add it before creating your `.env` file.
 
+## My Assets frontend
+
+The Rust API serves the complete My Assets page payload from
+`backend/data/my-assets.json` at `GET http://localhost:3000/api/assets`.
+The Svelte app proxies `/api` to that backend during development.
+
+Start the backend from `backend/`:
+
+```bash
+cargo run
+```
+
+In a second terminal, start the frontend from `frontend/`:
+
+```bash
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite (typically `http://localhost:5173`).
+
 ### 2. Run the app
 
 ```bash

@@ -3,7 +3,9 @@ use crate::providers::IdentityProvider;
 use crate::providers::mock::MockProvider;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect};
+use axum::Json;
 use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 use tower_sessions::Session;
 
@@ -98,6 +100,13 @@ pub async fn protected_handler(auth_session: AuthSession) -> impl IntoResponse {
 pub async fn index_handler() -> impl IntoResponse {
     "Home page. Try /login or /protected."
 }
+
+pub async fn my_assets_handler() -> Json<Value> {
+    let page = serde_json::from_str(include_str!("../data/my-assets.json"))
+        .expect("my-assets.json must contain valid JSON");
+    Json(page)
+}
+
 pub async fn shubham_handler() -> impl IntoResponse {
     "Shubham page. Try /login or /protected."
 }

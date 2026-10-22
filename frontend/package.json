@@ -1,0 +1,20 @@
+{
+  "name": "my-assets-portal",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "build": "npm run check && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "devDependencies": {
+    "@tsconfig/svelte": "^5.0.4",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "svelte": "^5.20.0",
+    "svelte-check": "^4.1.4",
+    "typescript": "~5.7.3",
+    "vite": "^6.3.5"
+  }
+}
