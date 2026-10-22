@@ -294,7 +294,7 @@
           "status": "needs_verification",
           "statusLabel": "Needs to Be Verified",
           "valueHelp": "Death benefit"
-        },
+        } ,
         {
           "id": "life-3",
           "name": "Disability",
